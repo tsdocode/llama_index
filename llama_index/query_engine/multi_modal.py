@@ -11,7 +11,7 @@ from llama_index.postprocessor.types import BaseNodePostprocessor
 from llama_index.prompts import BasePromptTemplate
 from llama_index.prompts.default_prompts import DEFAULT_TEXT_QA_PROMPT
 from llama_index.prompts.mixin import PromptMixinType
-from llama_index.response.schema import RESPONSE_TYPE, Response
+from llama_index.response.schema import RESPONSE_TYPE, Response, StreamingResponse
 from llama_index.schema import ImageNode, NodeWithScore
 
 
@@ -90,6 +90,7 @@ class SimpleMultiModalQueryEngine(BaseQueryEngine):
         query_bundle: QueryBundle,
         nodes: List[NodeWithScore],
         additional_source_nodes: Optional[Sequence[NodeWithScore]] = None,
+        stream=False,
     ) -> RESPONSE_TYPE:
         image_nodes, text_nodes = _get_image_and_text_nodes(nodes)
         context_str = "\n\n".join([r.get_content() for r in text_nodes])
@@ -97,15 +98,27 @@ class SimpleMultiModalQueryEngine(BaseQueryEngine):
             context_str=context_str, query_str=query_bundle.query_str
         )
 
-        llm_response = self._multi_modal_llm.complete(
-            prompt=fmt_prompt,
-            image_documents=[image_node.node for image_node in image_nodes],
-        )
-        return Response(
-            response=str(llm_response),
-            source_nodes=nodes,
-            metadata={"text_nodes": text_nodes, "image_nodes": image_nodes},
-        )
+        if stream:
+            llm_response = self._multi_modal_llm.stream_complete(
+                prompt=fmt_prompt,
+                image_documents=[image_node.node for image_node in image_nodes]
+            )
+            
+            return StreamingResponse(
+                response_gen=llm_response,
+                source_nodes=nodes,
+                metadata={"text_nodes": text_nodes, "image_nodes": image_nodes},
+            )
+        else:
+            llm_response = self._multi_modal_llm.complete(
+                prompt=fmt_prompt,
+                image_documents=[image_node.node for image_node in image_nodes],
+            )
+            return Response(
+                response=str(llm_response),
+                source_nodes=nodes,
+                metadata={"text_nodes": text_nodes, "image_nodes": image_nodes},
+            )
 
     async def asynthesize(
         self,
@@ -128,7 +141,31 @@ class SimpleMultiModalQueryEngine(BaseQueryEngine):
             metadata={"text_nodes": text_nodes, "image_nodes": image_nodes},
         )
 
-    def _query(self, query_bundle: QueryBundle) -> RESPONSE_TYPE:
+    def _query(self, query_bundle: QueryBundle, stream=False) -> RESPONSE_TYPE:
+        """Answer a query."""
+        with self.callback_manager.event(
+            CBEventType.QUERY, payload={EventPayload.QUERY_STR: query_bundle.query_str}
+        ) as query_event:
+            with self.callback_manager.event(
+                CBEventType.RETRIEVE,
+                payload={EventPayload.QUERY_STR: query_bundle.query_str},
+            ) as retrieve_event:
+                nodes = self.retrieve(query_bundle)
+
+                retrieve_event.on_end(
+                    payload={EventPayload.NODES: nodes},
+                )
+
+            response = self.synthesize(
+                query_bundle,
+                nodes=nodes
+            )
+
+            query_event.on_end(payload={EventPayload.RESPONSE: response})
+
+        return response
+
+    def _stream_query(self, query_bundle: QueryBundle) -> RESPONSE_TYPE:
         """Answer a query."""
         with self.callback_manager.event(
             CBEventType.QUERY, payload={EventPayload.QUERY_STR: query_bundle.query_str}
@@ -146,12 +183,13 @@ class SimpleMultiModalQueryEngine(BaseQueryEngine):
             response = self.synthesize(
                 query_bundle,
                 nodes=nodes,
+                stream=True
             )
 
             query_event.on_end(payload={EventPayload.RESPONSE: response})
 
         return response
-
+    
     async def _aquery(self, query_bundle: QueryBundle) -> RESPONSE_TYPE:
         """Answer a query."""
         with self.callback_manager.event(
