@@ -172,7 +172,24 @@ class OpenAIMultiModal(MultiModalLLM):
     def stream_complete(
         self, prompt: str, image_documents: Sequence[ImageDocument], **kwargs: Any
     ) -> MultiModalCompletionResponseGen:
-        raise NotImplementedError
+        message_dict = self._get_multi_modal_input_dict(prompt, image_documents)
+        response = self._client.chat.completions.create(
+            model=self.model,
+            messages=message_dict,
+            max_tokens=self.max_new_tokens,
+            stream=True
+        )
+        text = ""
+        
+        for chunk in response:
+            if chunk.choices[0].delta.content:
+                text += chunk.choices[0].delta.content
+                
+                yield MultiModalCompletionResponse(
+                    text=text,
+                    additional_kwargs=self._get_response_token_counts(response),
+                    delta=chunk.choices[0].delta.content
+                )
 
     async def acomplete(
         self, prompt: str, image_documents: Sequence[ImageDocument], **kwargs: Any
